@@ -1,0 +1,40 @@
+[Unit]
+Description=Maildeck read-only inbox panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maildeck
+Group=maildeck
+WorkingDirectory=/opt/maildeck
+Environment=PYTHONPATH=/opt/maildeck
+ExecStart=/usr/bin/python3 -m maildeck.server --host 127.0.0.1 --port 18793 --db /var/lib/maildeck/maildeck.sqlite --key /etc/maildeck/encryption.key
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/opt/maildeck /etc/maildeck
+ReadWritePaths=/var/lib/maildeck
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=100
+
+[Install]
+WantedBy=multi-user.target

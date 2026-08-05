@@ -1,0 +1,9 @@
+# Replace this example hostname with one you control.
+# Add an authentication layer before exposing Maildeck to a network.
+maildeck.example.com {
+	encode gzip zstd
+	request_body {
+		max_size 1200KB
+	}
+	reverse_proxy 127.0.0.1:18793
+}
