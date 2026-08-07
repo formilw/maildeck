@@ -237,6 +237,27 @@ function readerLoading() {
   restartAnimation($('#reader-pane'), 'is-revealing');
 }
 
+function renderMessageBody(message) {
+  const body = element('div', 'reader-body');
+  if (!message.bodyParts?.length) {
+    body.textContent = message.body || translate('noBody');
+    return body;
+  }
+  message.bodyParts.forEach((part) => {
+    if (!part?.text) return;
+    if (part.href) {
+      const link = element('a', 'reader-link', part.text);
+      link.href = part.href;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer nofollow';
+      body.append(link);
+    } else {
+      body.append(document.createTextNode(part.text));
+    }
+  });
+  return body;
+}
+
 function renderReader(message) {
   const content = element('div', 'reader-content');
   content.append(element('p', 'reader-kicker', `${providerTitle(state.activeAccount.provider).toUpperCase()} · ${formatDate(message.date)}`));
@@ -249,7 +270,7 @@ function renderReader(message) {
   metaCopy.append(element('div', 'reader-date', formatDate(message.date)));
   meta.append(metaCopy);
   content.append(meta);
-  content.append(element('div', 'reader-body', message.body || translate('noBody')));
+  content.append(renderMessageBody(message));
   if (message.attachments?.length) {
     const attachments = element('div', 'attachment-list');
     attachments.append(element('p', 'reader-kicker', `${translate('attachments')} · ${message.attachments.length}`));

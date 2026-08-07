@@ -7,6 +7,13 @@ STATIC = Path(__file__).resolve().parents[1] / "static"
 
 
 class FrontendTests(unittest.TestCase):
+    def test_reader_renders_structured_links_with_safe_external_navigation(self):
+        app = (STATIC / "app.js").read_text()
+        self.assertIn("function renderMessageBody(message)", app)
+        self.assertIn("message.bodyParts", app)
+        self.assertIn("link.target = '_blank';", app)
+        self.assertIn("link.rel = 'noopener noreferrer nofollow';", app)
+
     def test_every_static_translation_key_exists_in_both_languages(self):
         html = (STATIC / "index.html").read_text()
         i18n = (STATIC / "i18n.js").read_text()

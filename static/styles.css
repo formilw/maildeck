@@ -274,6 +274,9 @@ kbd { position: absolute; top: 10px; right: 10px; display: grid; place-items: ce
 .reader-from { overflow: hidden; color: var(--text); font-size: 13px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
 .reader-to, .reader-date { margin-top: 4px; color: var(--quiet); font-size: 11px; overflow-wrap: anywhere; }
 .reader-body { max-width: 72ch; padding-top: 30px; color: #d8d5df; font-size: 15px; line-height: 1.78; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.reader-link { color: var(--accent); text-decoration: underline; text-decoration-color: rgba(185,164,247,.45); text-underline-offset: 3px; }
+.reader-link:hover { color: #d8cbff; text-decoration-color: currentColor; }
+.reader-link:focus-visible { border-radius: 3px; outline: 2px solid var(--accent); outline-offset: 3px; }
 .attachment-list { display: grid; gap: 8px; margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--line); }
 .attachment { display: flex; justify-content: space-between; gap: 16px; padding: 11px 12px; color: var(--muted); font-size: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: rgba(255,255,255,.018); }
 

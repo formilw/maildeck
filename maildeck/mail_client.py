@@ -35,31 +35,111 @@ class MailboxError(RuntimeError):
 class _TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
+        self.parts: list[dict[str, str]] = []
         self.hidden_depth = 0
+        self.tag_stack: list[tuple[str, bool]] = []
+        self.link_stack: list[str | None] = []
+
+    @staticmethod
+    def _safe_href(value: str | None) -> str | None:
+        if not value or len(value) > 8192 or re.search(r"[\x00-\x1f\x7f]", value):
+            return None
+        href = html.unescape(value).strip()
+        parsed = urllib.parse.urlsplit(href)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            return None
+        return href
+
+    def _append(self, text: str, href: str | None = None) -> None:
+        if not text:
+            return
+        part = {"text": text}
+        if href:
+            part["href"] = href
+        if self.parts and self.parts[-1].get("href") == part.get("href"):
+            self.parts[-1]["text"] += text
+        else:
+            self.parts.append(part)
 
     def handle_starttag(self, tag: str, attrs):
-        if tag in {"script", "style", "noscript", "template"}:
+        attributes = dict(attrs)
+        style = re.sub(r"\s+", "", (attributes.get("style") or "").lower())
+        hidden = self.hidden_depth > 0 or tag in {"script", "style", "noscript", "template"}
+        hidden = hidden or "display:none" in style or "visibility:hidden" in style
+        if hidden:
             self.hidden_depth += 1
-        elif not self.hidden_depth and tag in {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "blockquote"}:
-            self.parts.append("\n")
+        self.tag_stack.append((tag, hidden))
+        if not hidden:
+            if tag in {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "blockquote"}:
+                self._append("\n")
+            if tag == "a":
+                self.link_stack.append(self._safe_href(attributes.get("href")))
 
     def handle_endtag(self, tag: str):
-        if tag in {"script", "style", "noscript", "template"} and self.hidden_depth:
-            self.hidden_depth -= 1
-        elif not self.hidden_depth and tag in {"p", "div", "li", "tr", "blockquote"}:
-            self.parts.append("\n")
+        hidden = False
+        for index in range(len(self.tag_stack) - 1, -1, -1):
+            if self.tag_stack[index][0] == tag:
+                closed = self.tag_stack[index:]
+                del self.tag_stack[index:]
+                hidden = any(item[1] for item in closed)
+                self.hidden_depth = max(0, self.hidden_depth - sum(item[1] for item in closed))
+                break
+        if not hidden and not self.hidden_depth:
+            if tag == "a" and self.link_stack:
+                self.link_stack.pop()
+            if tag in {"p", "div", "li", "tr", "blockquote"}:
+                self._append("\n")
 
     def handle_data(self, data: str):
         if not self.hidden_depth:
-            self.parts.append(data)
+            self._append(data, self.link_stack[-1] if self.link_stack else None)
 
     def text(self) -> str:
-        value = html.unescape("".join(self.parts)).replace("\r", "")
+        value = html.unescape("".join(part["text"] for part in self.parts)).replace("\r", "")
         value = re.sub(r"[ \t]+", " ", value)
         value = re.sub(r"\n[ \t]+", "\n", value)
         value = re.sub(r"\n{3,}", "\n\n", value)
         return value.strip()
+
+    def public_parts(self) -> list[dict[str, str]]:
+        result: list[dict[str, str]] = []
+        remaining = MAX_MESSAGE_BODY
+        pending_whitespace = ""
+
+        def append(text: str, href: str | None = None) -> None:
+            nonlocal remaining
+            if not text or remaining <= 0:
+                return
+            text = text[:remaining]
+            part = {"text": text}
+            if href:
+                part["href"] = href
+            if result and result[-1].get("href") == part.get("href"):
+                result[-1]["text"] += text
+            else:
+                result.append(part)
+            remaining -= len(text)
+
+        for source in self.parts:
+            if remaining <= 0:
+                break
+            text = source["text"].replace("\r", "").replace("\xa0", " ")
+            text = re.sub(r"[\u200b-\u200d\ufeff]", "", text)
+            for chunk in re.split(r"(\s+)", text):
+                if not chunk:
+                    continue
+                if chunk.isspace():
+                    if "\n" in chunk:
+                        pending_whitespace = "\n\n" if chunk.count("\n") >= 2 or "\n" in pending_whitespace else "\n"
+                    elif not pending_whitespace:
+                        pending_whitespace = " "
+                    continue
+                if result and pending_whitespace:
+                    whitespace_href = source.get("href") if pending_whitespace == " " else None
+                    append(pending_whitespace, whitespace_href)
+                pending_whitespace = ""
+                append(chunk, source.get("href"))
+        return result
 
 
 def _decode_header(value: str | None) -> str:
@@ -89,9 +169,10 @@ def _decode_part(part: Message) -> str:
         return payload.decode("utf-8", errors="replace")
 
 
-def _message_body(message: Message) -> str:
+def _message_body(message: Message) -> tuple[str, list[dict[str, str]]]:
     plain: list[str] = []
     rich: list[str] = []
+    rich_parts: list[dict[str, str]] = []
     parts = message.walk() if message.is_multipart() else [message]
     for part in parts:
         disposition = part.get_content_disposition()
@@ -104,9 +185,13 @@ def _message_body(message: Message) -> str:
             parser = _TextExtractor()
             parser.feed(_decode_part(part))
             parser.close()
-            rich.append(parser.text())
+            public_parts = parser.public_parts()
+            if rich_parts:
+                rich_parts.append({"text": "\n\n"})
+            rich_parts.extend(public_parts)
+            rich.append("".join(item["text"] for item in public_parts))
     body = "\n\n".join(value.strip() for value in (plain or rich) if value.strip())
-    return body[:MAX_MESSAGE_BODY]
+    return body[:MAX_MESSAGE_BODY], rich_parts
 
 
 def _attachments(message: Message) -> list[dict]:
@@ -134,6 +219,7 @@ def _date_iso(value: str | None) -> str | None:
 
 
 def message_to_public(message: Message, uid: str, flags: str = "") -> dict:
+    body, body_parts = _message_body(message)
     return {
         "uid": str(uid),
         "subject": _decode_header(message.get("Subject")) or "Без темы",
@@ -141,7 +227,8 @@ def message_to_public(message: Message, uid: str, flags: str = "") -> dict:
         "to": _decode_header(message.get("To")),
         "date": _date_iso(message.get("Date")),
         "isUnread": "\\Seen" not in flags,
-        "body": _message_body(message),
+        "body": body,
+        "bodyParts": body_parts,
         "attachments": _attachments(message),
     }
 
@@ -299,6 +386,7 @@ class MailService:
                     message = BytesParser(policy=policy.default).parsebytes(raw)
                     public = message_to_public(message, uid, flags)
                     public.pop("body", None)
+                    public.pop("bodyParts", None)
                     public.pop("attachments", None)
                     messages.append(public)
                 return {
