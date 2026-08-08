@@ -118,6 +118,15 @@ class FrontendTests(unittest.TestCase):
         ):
             self.assertIn(behavior, app)
 
+    def test_browser_qa_preserves_existing_accounts_and_folders(self):
+        qa = (Path(__file__).resolve().parents[1] / "tests" / "browser_qa.js").read_text()
+        self.assertIn("const baseline = await request(session, '/api/accounts');", qa)
+        self.assertNotIn("payload.accounts.map(a=>a.id)", qa)
+        self.assertIn("browser QA must preserve baseline accounts", qa)
+        self.assertIn("browser QA must preserve baseline folders", qa)
+        self.assertIn("MAILDECK_QA_DIR", qa)
+        self.assertIn("MAILDECK_CDP_URL", qa)
+
 
 if __name__ == "__main__":
     unittest.main()

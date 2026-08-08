@@ -2,7 +2,7 @@ const fs = require('fs');
 const http = require('http');
 const assert = require('assert');
 
-const CDP = 'http://127.0.0.1:9224';
+const CDP = process.env.MAILDECK_CDP_URL || 'http://127.0.0.1:9224';
 const APP = process.env.MAILDECK_QA_URL || 'http://127.0.0.1:28794';
 
 function requestJson(method, url) {
@@ -76,12 +76,24 @@ async function type(session, selector, value) {
   await evaluate(session, `(() => { const node = document.querySelector(${JSON.stringify(selector)}); if (!node) throw new Error('Missing ${selector}'); node.value = ${JSON.stringify(value)}; node.dispatchEvent(new Event('input', {bubbles:true})); return true; })()`);
 }
 
+const OUTPUT_DIR = process.env.MAILDECK_QA_DIR || '/tmp/maildeck-qa';
+
 async function screenshot(session, name, width, height) {
   await session.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width <= 640 });
   await new Promise((resolve) => setTimeout(resolve, 100));
   const result = await session.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
-  fs.mkdirSync('/tmp/maildeck-qa/screens', { recursive: true });
-  fs.writeFileSync(`/tmp/maildeck-qa/screens/${name}.png`, Buffer.from(result.data, 'base64'));
+  const screenDir = `${OUTPUT_DIR}/screens`;
+  fs.mkdirSync(screenDir, { recursive: true });
+  fs.writeFileSync(`${screenDir}/${name}.png`, Buffer.from(result.data, 'base64'));
+}
+
+async function request(session, url, options = {}) {
+  return evaluate(session, `(async () => {
+    const response = await fetch(${JSON.stringify(url)}, ${JSON.stringify(options)});
+    const body = response.status === 204 ? null : await response.json();
+    if (!response.ok) throw new Error(response.status + ': ' + JSON.stringify(body));
+    return body;
+  })()`);
 }
 
 async function main() {
@@ -98,13 +110,8 @@ async function main() {
   await waitForEvent(session, 'Page.loadEventFired');
   await waitFor(session, `document.querySelector('#account-list') && document.documentElement.lang === 'ru'`);
 
-  await evaluate(session, `(async () => {
-    const payload = await (await fetch('/api/accounts')).json();
-    if (payload.accounts.length) await fetch('/api/accounts/delete-batch', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids:payload.accounts.map(a=>a.id)})
-    });
-    await Promise.all(payload.folders.map(folder => fetch('/api/folders/' + folder.id, {method:'DELETE'})));
-  })()`);
+  // The production-like browser scenario must not mutate existing mailbox data.
+  const baseline = await request(session, '/api/accounts');
 
   // Seed through the site's own API in the page's origin.
   const seeded = await evaluate(session, `(async () => {
@@ -124,7 +131,9 @@ async function main() {
   assert(seeded.a.id && seeded.folder.id);
   await evaluate(session, `loadAccounts(false)`);
   await click(session, '#tab-firstmail');
-  await waitFor(session, `document.querySelectorAll('.account-item').length === 3`);
+  await waitFor(session, `[
+    '${seeded.a.id}', '${seeded.b.id}', '${seeded.c.id}'
+  ].every(id => document.querySelector('[data-account-id="' + id + '"]'))`);
 
   // Folder pin + account pin.
   await evaluate(session, `document.querySelector('.folder-section .pin-action').click()`);
@@ -212,7 +221,32 @@ async function main() {
     if (event.method === 'Log.entryAdded' && ['error','warning'].includes(event.params.entry.level)) consoleProblems.push(event.params.entry);
   }
   assert.strictEqual(consoleProblems.length, 0, `Console problems: ${JSON.stringify(consoleProblems)}`);
-  console.log(JSON.stringify({ ok:true, seeded, screenshots:['desktop-en','tablet-en','mobile-en','mobile-sidebar-en'], consoleProblems:0 }));
+
+  // Remove only test objects, then prove every baseline mailbox/folder survived.
+  await request(session, '/api/accounts/delete-batch', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ids:[seeded.a.id, seeded.b.id, seeded.c.id]}),
+  });
+  const current = await request(session, '/api/accounts');
+  await Promise.all(
+    current.folders
+      .filter(folder => !baseline.folders.some(existing => existing.id === folder.id))
+      .map(folder => request(session, `/api/folders/${folder.id}`, {method:'DELETE'})),
+  );
+  const restored = await request(session, '/api/accounts');
+  assert.deepStrictEqual(
+    restored.accounts.map(account => account.id).sort(),
+    baseline.accounts.map(account => account.id).sort(),
+    'browser QA must preserve baseline accounts',
+  );
+  assert.deepStrictEqual(
+    restored.folders.map(folder => folder.id).sort(),
+    baseline.folders.map(folder => folder.id).sort(),
+    'browser QA must preserve baseline folders',
+  );
+
+  console.log(JSON.stringify({ ok:true, screenshots:['desktop-en','tablet-en','mobile-en','mobile-sidebar-en'], consoleProblems:0, preservedBaseline:true }));
   session.socket.close();
 }
 
