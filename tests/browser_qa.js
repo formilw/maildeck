@@ -148,6 +148,14 @@ async function main() {
   assert.strictEqual(await evaluate(session, `document.querySelector('#confirm-description').textContent.includes('почтовые ящики')`), true);
   await click(session, '[data-action="cancel-confirm"]');
 
+  // A failed destructive request must keep the in-app confirmation open.
+  await evaluate(session, `openConfirmation({
+    title: translate('deleteAccountTitle'), description: 'QA', submitLabel: translate('delete'), action: async () => false,
+  })`);
+  await click(session, '#confirm-submit');
+  assert.strictEqual(await evaluate(session, `document.querySelector('#confirm-dialog').open`), true);
+  await click(session, '[data-action="cancel-confirm"]');
+
   // Copy address from the upper toolbar. Avoid a real IMAP attempt in QA.
   await evaluate(session, `(() => {
     state.activeAccount = state.accounts.find(account => account.id === '${seeded.b.id}');
