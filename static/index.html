@@ -7,9 +7,9 @@
   <meta name="theme-color" content="#0b0b14">
   <title data-i18n="documentTitle">Maildeck — единое окно почты</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=5">
-  <script src="/i18n.js?v=3" defer></script>
-  <script src="/app.js?v=4" defer></script>
+  <link rel="stylesheet" href="/styles.css?v=6">
+  <script src="/i18n.js?v=4" defer></script>
+  <script src="/app.js?v=5" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#message-pane" data-i18n="skipToMail">К письмам</a>
@@ -52,10 +52,23 @@
 
       <div class="sidebar-meta">
         <span id="provider-label" data-i18n="accountsOutlook">Аккаунты Outlook</span>
-        <button type="button" class="text-button" data-action="open-add" data-i18n="import">Импорт</button>
+        <div class="sidebar-meta-actions">
+          <button type="button" class="compact-action" id="selection-toggle" aria-pressed="false" data-i18n-aria="selectAccounts" data-i18n-title="selectAccounts" title="Выбрать аккаунты">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+          </button>
+          <button type="button" class="compact-action" id="create-folder-button" aria-label="Создать папку" title="Создать папку" data-i18n-aria="createFolder" data-i18n-title="createFolder">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5h7l2 2h9v9H3zM16 13v4m-2-2h4"/></svg>
+          </button>
+          <button type="button" class="text-button" data-action="open-add" data-i18n="import">Импорт</button>
+        </div>
       </div>
 
       <div id="account-list" class="account-list" role="tabpanel" aria-labelledby="tab-outlook" aria-live="polite"></div>
+
+      <div class="selection-bar" id="selection-bar" hidden>
+        <span id="selection-count">0</span>
+        <button type="button" class="selection-delete" id="delete-selected-button" data-i18n="deleteSelected">Удалить выбранные</button>
+      </div>
 
       <footer class="sidebar-footer">
         <span class="privacy-dot" aria-hidden="true"></span>
@@ -72,9 +85,14 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
           </button>
           <div class="avatar large" id="active-avatar" aria-hidden="true">M</div>
-          <div>
+          <div class="active-account-copy">
             <p class="header-label" data-i18n="inbox">ВХОДЯЩИЕ</p>
-            <h2 id="active-email" data-i18n="selectAccount">Выбери аккаунт</h2>
+            <div class="email-copy-row">
+              <h2 id="active-email" data-i18n="selectAccount">Выбери аккаунт</h2>
+              <button class="copy-email-button" id="copy-email-button" type="button" aria-label="Копировать адрес" title="Копировать адрес" data-i18n-aria="copyEmail" data-i18n-title="copyEmail" disabled>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+              </button>
+            </div>
           </div>
         </div>
         <div class="header-actions">
@@ -82,14 +100,11 @@
           <button class="icon-button" id="refresh-button" type="button" aria-label="Обновить письма" title="Обновить письма" data-i18n-aria="refresh" data-i18n-title="refresh" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 11V5m0 6h-6"/></svg>
           </button>
-          <button class="icon-button danger-ghost" id="delete-account-button" type="button" aria-label="Удалить аккаунт" title="Удалить аккаунт" data-i18n-aria="deleteAccount" data-i18n-title="deleteAccount" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/></svg>
-          </button>
         </div>
       </header>
 
       <div class="mail-layout" id="mail-layout">
-        <section class="message-list-pane" aria-label="Список писем" data-i18n-aria="messageListLabel">
+        <section class="message-list-pane" id="message-list-pane" tabindex="-1" aria-label="Список писем" data-i18n-aria="messageListLabel">
           <div class="mail-toolbar">
             <div>
               <p class="toolbar-title" data-i18n="recentMail">Последние письма</p>
@@ -108,6 +123,9 @@
         </section>
 
         <article class="reader-pane" id="reader-pane" aria-live="polite">
+          <button class="reader-back-button icon-button" id="reader-back-button" type="button" aria-label="Назад к письмам" title="Назад к письмам" data-i18n-aria="backToMessages" data-i18n-title="backToMessages">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
           <div class="reader-empty">
             <div class="reader-graphic" aria-hidden="true">
               <span class="ring ring-a"></span><span class="ring ring-b"></span><span class="core"></span>
@@ -129,7 +147,7 @@
           <h2 data-i18n="addAccounts">Добавить аккаунты</h2>
           <p data-i18n="singleOrFile">По одному или целым текстовым файлом.</p>
         </div>
-        <button class="icon-button" type="button" data-action="close-add" aria-label="Закрыть" data-i18n-aria="close">
+        <button class="icon-button" type="button" data-action="close-add" aria-label="Закрыть" title="Закрыть" data-i18n-aria="close" data-i18n-title="close">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
         </button>
       </header>
@@ -145,11 +163,11 @@
       </div>
 
       <section id="single-fields" class="form-section">
-        <label><span>Email</span><input name="email" type="email" autocomplete="off" placeholder="your Outlook address"></label>
+        <label><span>Email</span><input name="email" type="email" autocomplete="off" placeholder="Адрес Outlook" data-i18n-placeholder="outlookAddress"></label>
         <label><span data-i18n="password">Пароль</span><input name="password" type="password" autocomplete="new-password" placeholder="••••••••••••"></label>
         <div id="outlook-extra" class="outlook-extra">
-          <label>Refresh token<input name="refreshToken" type="password" autocomplete="off" placeholder="M.C..." spellcheck="false"></label>
-          <label>Client ID<input name="clientId" type="text" autocomplete="off" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" spellcheck="false"></label>
+          <label><span data-i18n="refreshToken">Токен обновления</span><input name="refreshToken" type="password" autocomplete="off" placeholder="M.C..." spellcheck="false"></label>
+          <label><span data-i18n="clientId">ID клиента</span><input name="clientId" type="text" autocomplete="off" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" spellcheck="false"></label>
         </div>
       </section>
 
@@ -165,11 +183,41 @@
         </label>
       </section>
 
+      <div class="folder-field">
+        <label for="folder-select" data-i18n="importFolder">Папка для импорта</label>
+        <select id="folder-select" name="folderId"><option value="" data-i18n="noFolder">Без папки</option></select>
+      </div>
+
       <p class="form-error" id="form-error" role="alert" hidden></p>
       <footer class="modal-footer">
         <p><span class="lock-icon" aria-hidden="true">⌁</span> <span data-i18n="encryptedServer">Данные шифруются на сервере</span></p>
         <button type="submit" class="primary-button" id="submit-add" data-i18n="add">Добавить</button>
       </footer>
+    </form>
+  </dialog>
+
+  <dialog id="folder-dialog" class="modal compact-modal">
+    <form method="dialog" class="modal-card" id="folder-form">
+      <header class="modal-header">
+        <div><p class="eyebrow" data-i18n="organization">ОРГАНИЗАЦИЯ</p><h2 data-i18n="newFolder">Новая папка</h2><p data-i18n="folderHint">Папка появится в текущем типе почты.</p></div>
+        <button class="icon-button" type="button" data-action="close-folder" aria-label="Закрыть" title="Закрыть" data-i18n-aria="close" data-i18n-title="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </header>
+      <section class="form-section"><label><span data-i18n="folderName">Название папки</span><input id="folder-name" name="folderName" type="text" maxlength="60" autocomplete="off" required placeholder="Например, Работа" data-i18n-placeholder="folderPlaceholder"></label></section>
+      <p class="form-error" id="folder-error" role="alert" hidden></p>
+      <footer class="modal-footer modal-footer-end"><button type="submit" class="primary-button" data-i18n="create">Создать</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="modal confirm-modal">
+    <form method="dialog" class="modal-card" id="confirm-form">
+      <div class="confirm-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/></svg></div>
+      <p class="eyebrow" data-i18n="carefulAction">ОСТОРОЖНОЕ ДЕЙСТВИЕ</p>
+      <h2 id="confirm-title" data-i18n="removeFromMaildeck">Удалить из Maildeck?</h2>
+      <p id="confirm-description" data-i18n="deleteDoesNotTouchMailbox">Почтовые ящики не удалятся. Исчезнут только записи из этой панели.</p>
+      <div class="confirm-actions">
+        <button type="button" class="secondary-button" data-action="cancel-confirm" data-i18n="cancel">Отмена</button>
+        <button type="submit" class="danger-button" id="confirm-submit" data-i18n="delete">Удалить</button>
+      </div>
     </form>
   </dialog>
 

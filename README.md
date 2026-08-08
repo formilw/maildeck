@@ -9,6 +9,9 @@ Maildeck is a self-hosted, read-only inbox panel for Outlook and Firstmail. User
 
 - separate Outlook and Firstmail tabs;
 - single-account and bulk text-file import;
+- folders for grouping accounts, with pinned folders and accounts;
+- per-account and batch deletion through an in-app confirmation dialog;
+- optional destination folder during single-account add or bulk import;
 - read-only IMAP access using `BODY.PEEK`, so opening mail does not mark it as read;
 - safe plain-text rendering of HTML messages, with scripts and remote content discarded;
 - encrypted password, refresh-token, and client-ID storage using Fernet;

@@ -2,6 +2,7 @@ const state = {
   lang: localStorage.getItem('maildeck-language') === 'en' ? 'en' : 'ru',
   provider: 'outlook',
   accounts: [],
+  folders: [],
   activeAccount: null,
   messages: [],
   activeMessage: null,
@@ -11,10 +12,22 @@ const state = {
   importProvider: 'outlook',
   addMode: 'single',
   file: null,
+  selectionMode: false,
+  selectedIds: new Set(),
+  collapsedFolders: new Set(),
+  confirmAction: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+const svg = (path) => `<svg viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
+
+const ICONS = {
+  pin: svg('<path d="m15 4 5 5-3 1-4 4v4l-2 2-2-7-5-5 2-2h4l4-4z"/>'),
+  trash: svg('<path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5m4-5v5"/>'),
+  folder: svg('<path d="M3 7.5h7l2 2h9v9H3z"/>'),
+  chevron: svg('<path d="m9 6 6 6-6 6"/>'),
+};
 
 function initials(email = '') {
   const name = email.split('@')[0].replace(/[^a-z0-9]/gi, '');
@@ -27,7 +40,7 @@ function providerTitle(provider) {
 
 function statusCopy(account) {
   if (account.status === 'connected') return translate('connected');
-  if (account.status === 'error') return state.lang === 'en' ? translate('needsCheck') : (account.lastError || translate('needsCheck'));
+  if (account.status === 'error') return translate('needsCheck');
   return translate('unchecked');
 }
 
@@ -51,15 +64,29 @@ function bytes(value) {
   return `${(value / 1024 / 1024).toFixed(1)} ${translate('megabytes')}`;
 }
 
+function translatedApiError(payload, status) {
+  const code = payload?.error?.code;
+  const details = payload?.error?.details;
+  const keyByCode = {
+    FILE_TOO_LARGE: 'fileTooBig', VALIDATION_ERROR: 'invalidData', ACCOUNT_NOT_FOUND: 'accountNotFound',
+    FOLDER_NOT_FOUND: 'folderNotFound', FOLDER_PROVIDER_MISMATCH: 'folderProviderMismatch',
+    FOLDER_NAME_CONFLICT: 'folderNameConflict', STORE_ERROR: 'dataReadError', NOT_FOUND: 'notFound',
+  };
+  if (code === 'INVALID_IMPORT_FORMAT') {
+    return details?.line ? translate('importFormatLine', { line: details.line }) : translate('invalidImportFormat');
+  }
+  return translate(keyByCode[code] || 'requestError', { status });
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    headers: { 'Content-Type': 'application/json', 'Accept-Language': state.lang, ...(options.headers || {}) },
   });
   let payload;
   try { payload = await response.json(); } catch { payload = null; }
   if (!response.ok) {
-    const error = new Error(payload?.error?.message || `${translate('error')} ${response.status}`);
+    const error = new Error(translatedApiError(payload, response.status));
     error.code = payload?.error?.code;
     throw error;
   }
@@ -73,49 +100,152 @@ function element(tag, className, text) {
   return node;
 }
 
+function iconButton(className, label, icon) {
+  const button = element('button', className);
+  button.type = 'button';
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.innerHTML = icon;
+  return button;
+}
+
 function toast(message, kind = 'success') {
   const node = element('div', `toast${kind === 'error' ? ' is-error' : ''}`, message);
   $('#toast-region').append(node);
   window.setTimeout(() => node.remove(), 4200);
 }
 
-function accountItem(account) {
-  const button = element('button', `account-item${state.activeAccount?.id === account.id ? ' is-active' : ''}`);
-  button.type = 'button';
-  button.dataset.accountId = account.id;
-  button.style.setProperty('--item-index', String(Math.min(state.accounts.indexOf(account), 8)));
-  button.setAttribute('aria-pressed', String(state.activeAccount?.id === account.id));
-  button.title = account.email;
+function folderById(id) {
+  return state.folders.find((folder) => folder.id === id);
+}
 
-  const avatar = element('span', 'avatar', initials(account.email));
-  avatar.setAttribute('aria-hidden', 'true');
+function providerFolders(provider = state.provider) {
+  return state.folders
+    .filter((folder) => folder.provider === provider)
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.name.localeCompare(b.name, state.lang));
+}
+
+function visibleAccounts() {
+  return state.accounts
+    .filter((account) => account.provider === state.provider && account.email.toLowerCase().includes(state.search))
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.email.localeCompare(b.email));
+}
+
+function accountItem(account) {
+  const row = element('div', `account-item${state.activeAccount?.id === account.id ? ' is-active' : ''}${state.selectedIds.has(account.id) ? ' is-selected' : ''}${account.pinned ? ' is-pinned' : ''}`);
+  row.dataset.accountId = account.id;
+  row.style.setProperty('--item-index', String(Math.min(state.accounts.indexOf(account), 8)));
+
+  if (state.selectionMode) {
+    const checkbox = element('input', 'account-checkbox');
+    checkbox.type = 'checkbox';
+    checkbox.checked = state.selectedIds.has(account.id);
+    checkbox.setAttribute('aria-label', translate('selectEmail', { email: account.email }));
+    checkbox.addEventListener('change', () => toggleAccountSelection(account.id));
+    row.append(checkbox);
+  } else {
+    const avatar = element('span', 'avatar', initials(account.email));
+    avatar.setAttribute('aria-hidden', 'true');
+    row.append(avatar);
+  }
+
+  const main = element('button', 'account-main');
+  main.type = 'button';
+  main.title = account.email;
+  main.setAttribute('aria-pressed', String(state.activeAccount?.id === account.id));
   const copy = element('span', 'account-copy');
   copy.append(element('span', 'account-email', account.email));
   const status = element('span', 'account-state');
-  status.append(element('span', `status-dot ${account.status}`));
-  status.append(document.createTextNode(statusCopy(account)));
-
+  status.append(element('span', `status-dot ${account.status}`), document.createTextNode(statusCopy(account)));
   copy.append(status);
-  button.append(avatar, copy, element('span', 'account-chevron', '›'));
-  button.addEventListener('click', () => selectAccount(account.id));
-  return button;
+  main.append(copy);
+  main.addEventListener('click', () => state.selectionMode ? toggleAccountSelection(account.id) : selectAccount(account.id));
+  row.append(main);
+
+  const actions = element('div', 'account-actions');
+  const pin = iconButton(`row-action pin-action${account.pinned ? ' is-active' : ''}`, account.pinned ? translate('unpinAccount') : translate('pinAccount'), ICONS.pin);
+  pin.setAttribute('aria-pressed', String(account.pinned));
+  pin.addEventListener('click', () => toggleAccountPin(account.id));
+
+  const folder = iconButton('row-action folder-action', translate('moveToFolder'), ICONS.folder);
+  const select = element('select', 'folder-move-select');
+  select.setAttribute('aria-label', translate('moveEmailToFolder', { email: account.email }));
+  select.append(new Option(translate('noFolder'), '', false, !account.folderId));
+  providerFolders(account.provider).forEach((item) => select.append(new Option(item.name, item.id, false, item.id === account.folderId)));
+  select.addEventListener('change', () => moveAccountToFolder(account.id, select.value || null));
+  folder.append(select);
+
+  const remove = iconButton('row-action delete-action', translate('deleteEmail', { email: account.email }), ICONS.trash);
+  remove.addEventListener('click', () => requestAccountDeletion(account.id));
+  actions.append(pin, folder, remove);
+  row.append(actions);
+  return row;
+}
+
+function folderSection(folder, accounts) {
+  const section = element('section', `folder-section${folder.pinned ? ' is-pinned' : ''}`);
+  const header = element('div', 'folder-header');
+  const collapse = iconButton('folder-collapse', translate('toggleFolder', { name: folder.name }), ICONS.chevron);
+  const collapsed = state.collapsedFolders.has(folder.id);
+  collapse.classList.toggle('is-collapsed', collapsed);
+  collapse.setAttribute('aria-expanded', String(!collapsed));
+  collapse.addEventListener('click', () => {
+    collapsed ? state.collapsedFolders.delete(folder.id) : state.collapsedFolders.add(folder.id);
+    renderAccounts();
+  });
+  const title = element('div', 'folder-title');
+  title.innerHTML = ICONS.folder;
+  title.append(element('span', '', folder.name), element('span', 'folder-count', String(accounts.length)));
+  const actions = element('div', 'folder-actions');
+  const pin = iconButton(`row-action pin-action${folder.pinned ? ' is-active' : ''}`, folder.pinned ? translate('unpinFolder') : translate('pinFolder'), ICONS.pin);
+  pin.setAttribute('aria-pressed', String(folder.pinned));
+  pin.addEventListener('click', () => toggleFolderPin(folder.id));
+  const remove = iconButton('row-action delete-action', translate('deleteFolderNamed', { name: folder.name }), ICONS.trash);
+  remove.addEventListener('click', () => requestFolderDeletion(folder.id));
+  actions.append(pin, remove);
+  header.append(collapse, title, actions);
+  section.append(header);
+  if (!collapsed) {
+    const list = element('div', 'folder-accounts');
+    accounts.forEach((account) => list.append(accountItem(account)));
+    if (!accounts.length) list.append(element('p', 'folder-empty', translate('emptyFolder')));
+    section.append(list);
+  }
+  return section;
+}
+
+function renderAccountSections(list, accounts) {
+  const pinned = accounts.filter((account) => account.pinned);
+  if (pinned.length) {
+    const label = element('p', 'account-section-label', translate('pinnedAccounts'));
+    list.append(label);
+    pinned.forEach((account) => list.append(accountItem(account)));
+  }
+  providerFolders().forEach((folder) => {
+    const folderAccounts = accounts.filter((account) => !account.pinned && account.folderId === folder.id);
+    list.append(folderSection(folder, folderAccounts));
+  });
+  const unfiled = accounts.filter((account) => !account.pinned && !account.folderId);
+  if (unfiled.length) {
+    if (providerFolders().length || pinned.length) list.append(element('p', 'account-section-label', translate('unfiled')));
+    unfiled.forEach((account) => list.append(accountItem(account)));
+  }
 }
 
 function renderAccounts() {
   const list = $('#account-list');
   list.replaceChildren();
-  const visible = state.accounts.filter((account) => account.provider === state.provider && account.email.includes(state.search.toLowerCase()));
+  const visible = visibleAccounts();
   $('#provider-label').textContent = `${translate('accounts')} ${providerTitle(state.provider)}`;
-  $('#account-list').setAttribute('aria-labelledby', `tab-${state.provider}`);
+  list.setAttribute('aria-labelledby', `tab-${state.provider}`);
   if (!visible.length) {
     const empty = element('div', 'empty-state compact-empty');
-    empty.append(element('div', 'empty-orbit'));
-    empty.append(element('h3', '', state.search ? translate('nothingFound') : translate('noAccounts')));
-    empty.append(element('p', '', state.search ? translate('tryAnother') : translate('addHint')));
+    empty.append(element('div', 'empty-orbit'), element('h3', '', state.search ? translate('nothingFound') : translate('noAccounts')), element('p', '', state.search ? translate('tryAnother') : translate('addHint')));
     list.append(empty);
-    return;
+  } else {
+    renderAccountSections(list, visible);
   }
-  visible.forEach((account) => list.append(accountItem(account)));
+  updateSelectionBar();
 }
 
 function updateCounts() {
@@ -123,12 +253,34 @@ function updateCounts() {
   $('#firstmail-count').textContent = state.accounts.filter((a) => a.provider === 'firstmail').length;
 }
 
+function updateSelectionBar() {
+  const count = state.selectedIds.size;
+  $('#selection-bar').hidden = !state.selectionMode;
+  $('#selection-count').textContent = translate('selectedCount', { count });
+  $('#delete-selected-button').disabled = count === 0;
+  $('#selection-toggle').classList.toggle('is-active', state.selectionMode);
+  $('#selection-toggle').setAttribute('aria-pressed', String(state.selectionMode));
+  $('#selection-toggle').title = state.selectionMode ? translate('finishSelection') : translate('selectAccounts');
+  $('#selection-toggle').setAttribute('aria-label', state.selectionMode ? translate('finishSelection') : translate('selectAccounts'));
+}
+
+function updateFolderSelect() {
+  const select = $('#folder-select');
+  const value = select.value;
+  select.replaceChildren(new Option(translate('noFolder'), ''));
+  providerFolders(state.importProvider).forEach((folder) => select.append(new Option(folder.name, folder.id)));
+  select.value = [...select.options].some((option) => option.value === value) ? value : '';
+}
+
 async function loadAccounts(preserve = true) {
   const previousId = preserve ? state.activeAccount?.id : null;
   const payload = await api('/api/accounts');
   state.accounts = payload.accounts;
+  state.folders = payload.folders || [];
   state.activeAccount = state.accounts.find((a) => a.id === previousId) || null;
+  state.selectedIds = new Set([...state.selectedIds].filter((id) => state.accounts.some((a) => a.id === id)));
   updateCounts();
+  updateFolderSelect();
   renderAccounts();
 }
 
@@ -136,6 +288,8 @@ function setProvider(provider) {
   const changed = state.provider !== provider;
   state.provider = provider;
   state.search = '';
+  state.selectionMode = false;
+  state.selectedIds.clear();
   $('#account-search').value = '';
   $$('.provider-tab').forEach((tab) => {
     const active = tab.dataset.provider === provider;
@@ -171,8 +325,29 @@ function renderHeader() {
   $('#active-email').textContent = account?.email || translate('selectAccount');
   $('#active-avatar').textContent = initials(account?.email);
   $('#refresh-button').disabled = !account;
-  $('#delete-account-button').disabled = !account;
+  $('#copy-email-button').disabled = !account;
   if (!account) setSyncStatus(translate('waiting'));
+}
+
+function closeReader() {
+  $('#mail-layout').classList.remove('reader-open');
+  $('#message-list-pane').focus({ preventScroll: true });
+}
+
+function resetMailbox() {
+  state.activeAccount = null;
+  state.messages = [];
+  state.activeMessage = null;
+  state.page = 1;
+  state.hasMore = false;
+  state.total = 0;
+  renderHeader();
+  $('#message-count').textContent = translate('selectMailboxLeft');
+  const empty = element('div', 'empty-state compact-empty');
+  empty.append(element('div', 'empty-orbit'), element('h3', '', translate('noAccountSelected')), element('p', '', translate('selectAddressHint')));
+  $('#message-list').replaceChildren(empty);
+  $('#load-more').hidden = true;
+  emptyReader();
 }
 
 function loadingMessages() {
@@ -190,8 +365,7 @@ function messageItem(message) {
   button.dataset.uid = message.uid;
   button.style.setProperty('--item-index', String(Math.min(state.messages.indexOf(message), 8)));
   const top = element('span', 'message-topline');
-  top.append(element('span', 'message-sender', message.from || translate('unknownSender')));
-  top.append(element('span', 'message-date', formatDate(message.date, true)));
+  top.append(element('span', 'message-sender', message.from || translate('unknownSender')), element('span', 'message-date', formatDate(message.date, true)));
   button.append(top, element('span', 'message-subject', message.subject || translate('noSubject')));
   if (message.isUnread) button.append(element('span', 'unread-mark'));
   button.addEventListener('click', () => openMessage(message.uid));
@@ -203,29 +377,30 @@ function renderMessages(append = false) {
   if (!append) list.replaceChildren();
   if (!state.messages.length) {
     const empty = element('div', 'empty-state compact-empty');
-    empty.append(element('div', 'empty-orbit'));
-    empty.append(element('h3', '', translate('noMail')));
-    empty.append(element('p', '', translate('emptyInbox')));
+    empty.append(element('div', 'empty-orbit'), element('h3', '', translate('noMail')), element('p', '', translate('emptyInbox')));
     list.append(empty);
   } else {
     const existing = new Set($$('[data-uid]', list).map((node) => node.dataset.uid));
     state.messages.filter((message) => !existing.has(message.uid)).forEach((message) => list.append(messageItem(message)));
   }
-  $('#message-count').textContent = translate('messageCount', {
-    shown: state.messages.length,
-    total: state.total || state.messages.length,
-  });
+  $('#message-count').textContent = translate('messageCount', { shown: state.messages.length, total: state.total || state.messages.length });
   $('#load-more').hidden = !state.hasMore;
   restartAnimation(list, append ? 'is-appending' : 'is-switching');
+}
+
+function readerBackButton() {
+  const button = iconButton('reader-back-button icon-button', translate('backToMessages'), svg('<path d="m15 18-6-6 6-6"/>'));
+  button.id = 'reader-back-button';
+  button.addEventListener('click', closeReader);
+  return button;
 }
 
 function emptyReader() {
   const box = element('div', 'reader-empty');
   const graphic = element('div', 'reader-graphic');
   graphic.append(element('span', 'ring ring-a'), element('span', 'ring ring-b'), element('span', 'core'));
-  box.append(graphic, element('p', 'eyebrow', translate('zeroDistraction')), element('h3', '', translate('selectMessage')));
-  box.append(element('p', '', translate('safeMessageHint')));
-  $('#reader-pane').replaceChildren(box);
+  box.append(graphic, element('p', 'eyebrow', translate('zeroDistraction')), element('h3', '', translate('selectMessage')), element('p', '', translate('safeMessageHint')));
+  $('#reader-pane').replaceChildren(readerBackButton(), box);
   $('#mail-layout').classList.remove('reader-open');
   restartAnimation($('#reader-pane'), 'is-revealing');
 }
@@ -233,7 +408,7 @@ function emptyReader() {
 function readerLoading() {
   const box = element('div', 'reader-empty');
   box.append(element('p', 'eyebrow', translate('decryptingMessage')), element('h3', '', translate('opening')));
-  $('#reader-pane').replaceChildren(box);
+  $('#reader-pane').replaceChildren(readerBackButton(), box);
   restartAnimation($('#reader-pane'), 'is-revealing');
 }
 
@@ -251,9 +426,7 @@ function renderMessageBody(message) {
       link.target = '_blank';
       link.rel = 'noopener noreferrer nofollow';
       body.append(link);
-    } else {
-      body.append(document.createTextNode(part.text));
-    }
+    } else body.append(document.createTextNode(part.text));
   });
   return body;
 }
@@ -269,8 +442,7 @@ function renderReader(message) {
   metaCopy.append(element('div', 'reader-to', message.to ? `${translate('to')}: ${message.to}` : translate('recipientMissing')));
   metaCopy.append(element('div', 'reader-date', formatDate(message.date)));
   meta.append(metaCopy);
-  content.append(meta);
-  content.append(renderMessageBody(message));
+  content.append(meta, renderMessageBody(message));
   if (message.attachments?.length) {
     const attachments = element('div', 'attachment-list');
     attachments.append(element('p', 'reader-kicker', `${translate('attachments')} · ${message.attachments.length}`));
@@ -282,7 +454,7 @@ function renderReader(message) {
     content.append(attachments);
   }
   const reader = $('#reader-pane');
-  reader.replaceChildren(content);
+  reader.replaceChildren(readerBackButton(), content);
   reader.scrollTop = 0;
   $('#mail-layout').classList.add('reader-open');
   restartAnimation(reader, 'is-revealing');
@@ -323,10 +495,9 @@ async function selectAccount(id) {
 function errorState(message, retry) {
   const box = element('div', 'empty-state compact-empty');
   box.append(element('div', 'empty-orbit'), element('h3', '', translate('openFailed')), element('p', '', message));
-  const button = element('button', 'primary-button', translate('retry'));
+  const button = element('button', 'primary-button retry-button', translate('retry'));
   button.type = 'button';
   button.addEventListener('click', retry);
-  button.style.marginTop = '18px';
   box.append(button);
   return box;
 }
@@ -341,7 +512,7 @@ async function openMessage(uid) {
     state.activeMessage = message;
     renderReader(message);
   } catch (error) {
-    $('#reader-pane').replaceChildren(errorState(error.message, () => openMessage(uid)));
+    $('#reader-pane').replaceChildren(readerBackButton(), errorState(error.message, () => openMessage(uid)));
     toast(error.message, 'error');
   }
 }
@@ -382,20 +553,26 @@ function openAdd(provider = state.provider) {
 function setImportProvider(provider) {
   const changed = state.importProvider !== provider;
   state.importProvider = provider;
-  $$('.modal-provider').forEach((button) => button.classList.toggle('is-active', button.dataset.importProvider === provider));
+  $$('.modal-provider').forEach((button) => {
+    const active = button.dataset.importProvider === provider;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
   $('#outlook-extra').hidden = provider !== 'outlook';
-  $('#format-hint').textContent = provider === 'outlook'
-    ? translate('outlookFormat')
-    : translate('firstmailFormat');
-  const email = $('#add-form [name="email"]');
-  email.placeholder = provider === 'outlook' ? 'your Outlook address' : 'your Firstmail address';
+  $('#format-hint').textContent = provider === 'outlook' ? translate('outlookFormat') : translate('firstmailFormat');
+  $('#add-form [name="email"]').placeholder = translate(provider === 'outlook' ? 'outlookAddress' : 'firstmailAddress');
+  updateFolderSelect();
   if (changed) restartAnimation($('#single-fields'), 'is-switching');
 }
 
 function setAddMode(mode) {
   const changed = state.addMode !== mode;
   state.addMode = mode;
-  $$('.mode-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.mode === mode));
+  $$('.mode-tab').forEach((button) => {
+    const active = button.dataset.mode === mode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
   $('#single-fields').hidden = mode !== 'single';
   $('#bulk-fields').hidden = mode !== 'bulk';
   $('#submit-add').textContent = mode === 'single' ? translate('add') : translate('importAction');
@@ -405,8 +582,8 @@ function setAddMode(mode) {
   }
 }
 
-function showFormError(message) {
-  const error = $('#form-error');
+function showFormError(message, selector = '#form-error') {
+  const error = $(selector);
   error.textContent = message;
   error.hidden = false;
 }
@@ -420,16 +597,14 @@ async function submitAdd(event) {
   submit.textContent = translate('saving');
   try {
     let result;
+    const folderId = $('#folder-select').value || null;
     if (state.addMode === 'single') {
       const form = new FormData($('#add-form'));
       result = await api('/api/accounts', {
         method: 'POST',
         body: JSON.stringify({
-          provider: state.importProvider,
-          email: form.get('email'),
-          password: form.get('password'),
-          refreshToken: form.get('refreshToken'),
-          clientId: form.get('clientId'),
+          provider: state.importProvider, email: form.get('email'), password: form.get('password'),
+          refreshToken: form.get('refreshToken'), clientId: form.get('clientId'), folderId,
         }),
       });
       toast(result.created ? translate('accountAdded') : translate('accountUpdated'));
@@ -438,8 +613,7 @@ async function submitAdd(event) {
       if (state.file.size > 1024 * 1024) throw new Error(translate('fileTooBig'));
       const content = await state.file.text();
       result = await api('/api/import', {
-        method: 'POST',
-        body: JSON.stringify({ provider: state.importProvider, content }),
+        method: 'POST', body: JSON.stringify({ provider: state.importProvider, folderId, content }),
       });
       toast(translate('imported', result));
     }
@@ -454,35 +628,192 @@ async function submitAdd(event) {
   }
 }
 
-async function deleteActiveAccount() {
-  const account = state.activeAccount;
+async function toggleAccountPin(id) {
+  const account = state.accounts.find((item) => item.id === id);
   if (!account) return;
-  if (!window.confirm(translate('deleteConfirm', { email: account.email }))) return;
   try {
-    await api(`/api/accounts/${account.id}`, { method: 'DELETE' });
-    state.activeAccount = null;
-    state.messages = [];
-    state.activeMessage = null;
-    renderHeader();
-    renderMessages();
-    emptyReader();
-    await loadAccounts(false);
-    toast(translate('accountDeleted'));
+    await api(`/api/accounts/${id}`, { method: 'PATCH', body: JSON.stringify({ pinned: !account.pinned }) });
+    await loadAccounts(true);
+    toast(account.pinned ? translate('accountUnpinned') : translate('accountPinned'));
   } catch (error) { toast(error.message, 'error'); }
+}
+
+async function moveAccountToFolder(id, folderId) {
+  try {
+    await api(`/api/accounts/${id}`, { method: 'PATCH', body: JSON.stringify({ folderId }) });
+    await loadAccounts(true);
+    toast(folderId ? translate('accountMoved') : translate('accountUnfiled'));
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function toggleFolderPin(id) {
+  const folder = folderById(id);
+  if (!folder) return;
+  try {
+    await api(`/api/folders/${id}`, { method: 'PATCH', body: JSON.stringify({ pinned: !folder.pinned }) });
+    await loadAccounts(true);
+    toast(folder.pinned ? translate('folderUnpinned') : translate('folderPinned'));
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+function toggleAccountSelection(id) {
+  state.selectedIds.has(id) ? state.selectedIds.delete(id) : state.selectedIds.add(id);
+  renderAccounts();
+}
+
+function toggleSelectionMode() {
+  state.selectionMode = !state.selectionMode;
+  if (!state.selectionMode) state.selectedIds.clear();
+  renderAccounts();
+}
+
+function openConfirmation({ title, description, submitLabel, action }) {
+  $('#confirm-title').textContent = title;
+  $('#confirm-description').textContent = description;
+  $('#confirm-submit').textContent = submitLabel;
+  state.confirmAction = action;
+  $('#confirm-dialog').showModal();
+  restartAnimation($('#confirm-form'), 'is-revealing');
+}
+
+function requestAccountDeletion(id) {
+  const account = state.accounts.find((item) => item.id === id);
+  if (!account) return;
+  openConfirmation({
+    title: translate('deleteAccountTitle'),
+    description: translate('deleteAccountDescription', { email: account.email }),
+    submitLabel: translate('delete'),
+    action: () => deleteAccounts([id]),
+  });
+}
+
+function deleteSelectedAccounts() {
+  if (!state.selectedIds.size) return;
+  openConfirmation({
+    title: translate('deleteAccountsTitle', { count: state.selectedIds.size }),
+    description: translate('deleteAccountsDescription'),
+    submitLabel: translate('deleteCount', { count: state.selectedIds.size }),
+    action: () => deleteAccounts([...state.selectedIds]),
+  });
+}
+
+function requestFolderDeletion(id) {
+  const folder = folderById(id);
+  if (!folder) return;
+  openConfirmation({
+    title: translate('deleteFolderTitle'),
+    description: translate('deleteFolderDescription', { name: folder.name }),
+    submitLabel: translate('deleteFolder'),
+    action: () => deleteFolder(id),
+  });
+}
+
+async function deleteAccounts(ids) {
+  const activeDeleted = state.activeAccount && ids.includes(state.activeAccount.id);
+  try {
+    const result = await api('/api/accounts/delete-batch', { method: 'POST', body: JSON.stringify({ ids }) });
+    state.selectedIds.clear();
+    state.selectionMode = false;
+    if (activeDeleted) resetMailbox();
+    await loadAccounts(!activeDeleted);
+    toast(translate('accountsDeleted', { count: result.deleted }));
+    return true;
+  } catch (error) {
+    toast(error.message, 'error');
+    return false;
+  }
+}
+
+async function deleteFolder(id) {
+  try {
+    await api(`/api/folders/${id}`, { method: 'DELETE' });
+    await loadAccounts(true);
+    toast(translate('folderDeleted'));
+    return true;
+  } catch (error) {
+    toast(error.message, 'error');
+    return false;
+  }
+}
+
+async function submitFolder(event) {
+  event.preventDefault();
+  const submit = $('#folder-form button[type="submit"]');
+  $('#folder-error').hidden = true;
+  submit.disabled = true;
+  try {
+    await api('/api/folders', { method: 'POST', body: JSON.stringify({ provider: state.provider, name: $('#folder-name').value }) });
+    $('#folder-dialog').close();
+    await loadAccounts(true);
+    toast(translate('folderCreated'));
+  } catch (error) { showFormError(error.message, '#folder-error'); }
+  finally { submit.disabled = false; }
+}
+
+async function copyActiveEmail() {
+  if (!state.activeAccount) return;
+  try {
+    await navigator.clipboard.writeText(state.activeAccount.email);
+    toast(translate('emailCopied'));
+  } catch {
+    const area = element('textarea', 'clipboard-fallback', state.activeAccount.email);
+    document.body.append(area);
+    area.select();
+    const copied = document.execCommand('copy');
+    area.remove();
+    toast(translate(copied ? 'emailCopied' : 'copyFailed'), copied ? 'success' : 'error');
+  }
+}
+
+function installDialogDismiss(dialogSelector, closeSelector) {
+  const dialog = $(dialogSelector);
+  $(closeSelector).addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
 }
 
 function installEvents() {
   $('#language-toggle').addEventListener('click', () => setLanguage(state.lang === 'ru' ? 'en' : 'ru'));
   $$('.provider-tab').forEach((tab) => tab.addEventListener('click', () => setProvider(tab.dataset.provider)));
   $$('[data-action="open-add"]').forEach((button) => button.addEventListener('click', () => openAdd()));
-  $('[data-action="close-add"]').addEventListener('click', () => $('#add-dialog').close());
+  installDialogDismiss('#add-dialog', '[data-action="close-add"]');
+  installDialogDismiss('#folder-dialog', '[data-action="close-folder"]');
   $('[data-action="toggle-sidebar"]').addEventListener('click', () => document.body.classList.toggle('sidebar-open'));
   $('[data-action="close-sidebar"]').addEventListener('click', () => document.body.classList.remove('sidebar-open'));
   $('#account-search').addEventListener('input', (event) => { state.search = event.target.value.trim().toLowerCase(); renderAccounts(); });
   $('#refresh-button').addEventListener('click', () => state.activeAccount && selectAccount(state.activeAccount.id));
-  $('#delete-account-button').addEventListener('click', deleteActiveAccount);
+  $('#copy-email-button').addEventListener('click', copyActiveEmail);
+  $('#selection-toggle').addEventListener('click', toggleSelectionMode);
+  $('#delete-selected-button').addEventListener('click', deleteSelectedAccounts);
+  $('#create-folder-button').addEventListener('click', () => {
+    $('#folder-form').reset(); $('#folder-error').hidden = true; $('#folder-dialog').showModal(); $('#folder-name').focus();
+  });
   $('#load-more').addEventListener('click', loadMore);
   $('#add-form').addEventListener('submit', submitAdd);
+  $('#folder-form').addEventListener('submit', submitFolder);
+  $('#confirm-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const action = state.confirmAction;
+    if (!action) return;
+    const submit = $('#confirm-submit');
+    submit.disabled = true;
+    try {
+      const succeeded = await action();
+      if (succeeded) {
+        state.confirmAction = null;
+        $('#confirm-dialog').close();
+      }
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  $('[data-action="cancel-confirm"]').addEventListener('click', () => { state.confirmAction = null; $('#confirm-dialog').close(); });
+  $('#confirm-dialog').addEventListener('cancel', () => { state.confirmAction = null; });
+  $('#confirm-dialog').addEventListener('click', (event) => {
+    if (event.target === $('#confirm-dialog')) {
+      state.confirmAction = null;
+      $('#confirm-dialog').close();
+    }
+  });
   $$('.modal-provider').forEach((button) => button.addEventListener('click', () => setImportProvider(button.dataset.importProvider)));
   $$('.mode-tab').forEach((button) => button.addEventListener('click', () => setAddMode(button.dataset.mode)));
   $('#file-input').addEventListener('change', (event) => {
@@ -496,16 +827,24 @@ function installEvents() {
     state.file = event.dataTransfer.files[0] || null;
     $('#file-name').textContent = state.file ? state.file.name : translate('chooseFile');
   });
-  $('#add-dialog').addEventListener('click', (event) => {
-    if (event.target === $('#add-dialog')) $('#add-dialog').close();
-  });
   document.addEventListener('keydown', (event) => {
-    if (event.key === '/' && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) {
-      event.preventDefault();
-      $('#account-search').focus();
+    if (event.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
+      event.preventDefault(); $('#account-search').focus();
     }
     if (event.key === 'Escape') document.body.classList.remove('sidebar-open');
   });
+}
+
+function renderLocalizedState() {
+  renderAccounts();
+  renderHeader();
+  updateFolderSelect();
+  if (state.activeAccount) renderMessages();
+  else resetMailbox();
+  if (state.activeMessage?.body !== undefined) renderReader(state.activeMessage);
+  else if (state.activeAccount) emptyReader();
+  setImportProvider(state.importProvider);
+  setAddMode(state.addMode);
 }
 
 async function start() {

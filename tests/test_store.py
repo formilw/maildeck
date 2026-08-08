@@ -5,7 +5,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from maildeck.store import AccountStore
+from maildeck.store import AccountStore, StoreError
 
 
 class AccountStoreTests(unittest.TestCase):
@@ -71,6 +71,52 @@ class AccountStoreTests(unittest.TestCase):
         account = self.store.list_accounts()[0]
         self.assertEqual(account["status"], "error")
         self.assertEqual(account["lastError"], "Не удалось войти в почту")
+
+    def test_accounts_can_be_grouped_and_pinned(self):
+        folder = self.store.create_folder("firstmail", "Рабочие")
+        self.store.upsert_accounts([{
+            "provider": "firstmail", "email": self.mailbox("alpha", "firsthidden.com"),
+            "password": "Secret!1234", "refresh_token": None, "client_id": None,
+        }], folder_id=folder["id"])
+        account = self.store.list_accounts()[0]
+
+        self.assertEqual(account["folderId"], folder["id"])
+        self.assertFalse(account["pinned"])
+
+        updated = self.store.update_account_organization(account["id"], pinned=True, folder_id=None)
+        self.assertTrue(updated["pinned"])
+        self.assertIsNone(updated["folderId"])
+
+    def test_folder_provider_must_match_account_provider(self):
+        folder = self.store.create_folder("outlook", "Outlook only")
+        with self.assertRaises(StoreError):
+            self.store.upsert_accounts([{
+                "provider": "firstmail", "email": self.mailbox("alpha", "firsthidden.com"),
+                "password": "Secret!1234", "refresh_token": None, "client_id": None,
+            }], folder_id=folder["id"])
+
+    def test_deleting_folder_keeps_accounts_unfiled(self):
+        folder = self.store.create_folder("firstmail", "Temporary")
+        self.store.upsert_accounts([{
+            "provider": "firstmail", "email": self.mailbox("alpha", "firsthidden.com"),
+            "password": "Secret!1234", "refresh_token": None, "client_id": None,
+        }], folder_id=folder["id"])
+
+        self.assertTrue(self.store.delete_folder(folder["id"]))
+        self.assertIsNone(self.store.list_accounts()[0]["folderId"])
+
+    def test_batch_delete_is_atomic_and_reports_deleted_count(self):
+        for local in ("alpha", "beta", "gamma"):
+            self.store.upsert_accounts([{
+                "provider": "firstmail", "email": self.mailbox(local, "firsthidden.com"),
+                "password": "Secret!1234", "refresh_token": None, "client_id": None,
+            }])
+        accounts = self.store.list_accounts()
+
+        deleted = self.store.delete_accounts([accounts[0]["id"], accounts[2]["id"]])
+
+        self.assertEqual(deleted, 2)
+        self.assertEqual([item["email"] for item in self.store.list_accounts()], [accounts[1]["email"]])
 
 
 if __name__ == "__main__":

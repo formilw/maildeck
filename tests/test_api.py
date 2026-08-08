@@ -79,6 +79,55 @@ class APITests(unittest.TestCase):
         self.assertEqual(status, 413)
         self.assertEqual(json.loads(body)["error"]["code"], "FILE_TOO_LARGE")
 
+    def test_folder_import_pin_move_and_batch_delete_flow(self):
+        status, _, body = self.call("POST", "/api/folders", {
+            "provider": "firstmail", "name": "Work",
+        })
+        self.assertEqual(status, 201)
+        folder = json.loads(body)["folder"]
+
+        address = self.mailbox("alpha", "firsthidden.com")
+        status, _, body = self.call("POST", "/api/import", {
+            "provider": "firstmail", "folderId": folder["id"],
+            "content": f"{address}:Secret!1234",
+        })
+        self.assertEqual(status, 201)
+
+        status, _, body = self.call("GET", "/api/accounts", None)
+        payload = json.loads(body)
+        self.assertEqual(payload["folders"][0]["name"], "Work")
+        account = payload["accounts"][0]
+        self.assertEqual(account["folderId"], folder["id"])
+
+        status, _, body = self.call("PATCH", f"/api/accounts/{account['id']}", {
+            "pinned": True, "folderId": None,
+        })
+        self.assertEqual(status, 200)
+        updated = json.loads(body)["account"]
+        self.assertTrue(updated["pinned"])
+        self.assertIsNone(updated["folderId"])
+
+        status, _, body = self.call("PATCH", f"/api/folders/{folder['id']}", {"pinned": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["folder"]["pinned"])
+
+        status, _, body = self.call("POST", "/api/accounts/delete-batch", {"ids": [account["id"]]})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["deleted"], 1)
+
+    def test_rejects_folder_from_another_provider_during_import(self):
+        _, _, body = self.call("POST", "/api/folders", {"provider": "outlook", "name": "Outlook"})
+        folder_id = json.loads(body)["folder"]["id"]
+        address = self.mailbox("alpha", "firsthidden.com")
+
+        status, _, body = self.call("POST", "/api/import", {
+            "provider": "firstmail", "folderId": folder_id,
+            "content": f"{address}:Secret!1234",
+        })
+
+        self.assertEqual(status, 422)
+        self.assertEqual(json.loads(body)["error"]["code"], "FOLDER_PROVIDER_MISMATCH")
+
 
 if __name__ == "__main__":
     unittest.main()

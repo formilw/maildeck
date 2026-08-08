@@ -114,6 +114,9 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._api() if urlsplit(self.path).path.startswith("/api/") else self.send_error(405)
 
+    def do_PATCH(self) -> None:
+        self._api() if urlsplit(self.path).path.startswith("/api/") else self.send_error(405)
+
     def do_DELETE(self) -> None:
         self._api() if urlsplit(self.path).path.startswith("/api/") else self.send_error(405)
 

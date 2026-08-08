@@ -47,6 +47,9 @@ class ServerTests(unittest.TestCase):
             urllib.request.urlopen(request)
         self.assertEqual(caught.exception.code, 404)
 
+    def test_server_forwards_patch_requests_to_api(self):
+        self.assertTrue(hasattr(RequestHandler, "do_PATCH"))
+
     def test_rejects_overly_broad_encryption_key_permissions(self):
         key_path = Path(self.tempdir.name) / "key"
         key_path.write_bytes(Fernet.generate_key())

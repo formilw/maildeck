@@ -1,4 +1,6 @@
+import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -79,6 +81,42 @@ class FrontendTests(unittest.TestCase):
         self.assertRegex(css, r"\.mail-layout\s*\{[^}]*overflow:\s*hidden;")
         app = (STATIC / "app.js").read_text()
         self.assertIn("reader.scrollTop = 0;", app)
+
+    def test_all_dynamic_translation_keys_exist_in_both_languages(self):
+        app = (STATIC / "app.js").read_text()
+        html = (STATIC / "index.html").read_text()
+        i18n = (STATIC / "i18n.js").read_text()
+        output = subprocess.run(
+            ["node", "-e", i18n + "\nconsole.log(JSON.stringify(I18N));"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        catalog = json.loads(output)
+        keys = set(re.findall(r"translate\(['\"]([A-Za-z0-9]+)['\"]", app))
+        keys.update(re.findall(r'data-i18n(?:-placeholder|-aria|-title)?="([A-Za-z0-9]+)"', html))
+        self.assertEqual(set(catalog["ru"]), set(catalog["en"]))
+        self.assertFalse(keys - set(catalog["ru"]), keys - set(catalog["ru"]))
+
+    def test_destructive_actions_use_site_dialog_not_browser_confirm(self):
+        app = (STATIC / "app.js").read_text()
+        html = (STATIC / "index.html").read_text()
+        self.assertNotIn("window.confirm", app)
+        self.assertIn('id="confirm-dialog"', html)
+        self.assertIn("requestAccountDeletion", app)
+        self.assertIn("deleteSelectedAccounts", app)
+
+    def test_sidebar_account_organization_and_copy_controls_exist(self):
+        app = (STATIC / "app.js").read_text()
+        html = (STATIC / "index.html").read_text()
+        for marker in (
+            'id="selection-toggle"', 'id="create-folder-button"', 'id="selection-bar"',
+            'id="copy-email-button"', 'id="folder-select"', 'id="folder-dialog"',
+        ):
+            self.assertIn(marker, html)
+        for behavior in (
+            "toggleAccountPin", "moveAccountToFolder", "toggleFolderPin",
+            "copyActiveEmail", "renderAccountSections",
+        ):
+            self.assertIn(behavior, app)
 
 
 if __name__ == "__main__":
