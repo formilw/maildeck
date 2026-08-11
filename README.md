@@ -1,6 +1,6 @@
 # Maildeck
 
-Maildeck is a self-hosted, read-only inbox panel for Outlook and Firstmail. Users add their own mailbox credentials in the browser or upload a UTF-8 text file, then read `INBOX` messages in a bilingual Russian/English interface.
+Maildeck is a self-hosted, read-only mail panel for Outlook and Firstmail. Users add their own mailbox credentials in the browser or upload a UTF-8 text file, then read messages from every selectable IMAP folder in one bilingual Russian/English timeline.
 
 ![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg)
@@ -13,6 +13,7 @@ Maildeck is a self-hosted, read-only inbox panel for Outlook and Firstmail. User
 - per-account and batch deletion through an in-app confirmation dialog;
 - optional destination folder during single-account add or bulk import;
 - read-only IMAP access using `BODY.PEEK`, so opening mail does not mark it as read;
+- one newest-first timeline across Inbox, Drafts, Sent, Archive, Spam, Trash, and other selectable IMAP folders;
 - safe plain-text rendering of HTML messages, with scripts and remote content discarded;
 - encrypted password, refresh-token, and client-ID storage using Fernet;
 - no credential fields in API responses;

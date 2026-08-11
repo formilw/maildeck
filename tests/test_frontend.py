@@ -16,6 +16,13 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("link.target = '_blank';", app)
         self.assertIn("link.rel = 'noopener noreferrer nofollow';", app)
 
+    def test_combined_mailbox_list_preserves_source_folder_for_opening(self):
+        app = (STATIC / "app.js").read_text()
+        self.assertIn("button.dataset.folder = message.folder || 'INBOX';", app)
+        self.assertIn("openMessage(message.uid, message.folder)", app)
+        self.assertIn("?folder=${encodeURIComponent(folder)}", app)
+        self.assertIn("message-folder", app)
+
     def test_every_static_translation_key_exists_in_both_languages(self):
         html = (STATIC / "index.html").read_text()
         i18n = (STATIC / "i18n.js").read_text()

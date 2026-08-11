@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import html
 import imaplib
 import json
@@ -10,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 from email import policy
 from email.header import decode_header
@@ -233,10 +235,119 @@ def message_to_public(message: Message, uid: str, flags: str = "") -> dict:
     }
 
 
-def safe_folder_name(folder: str) -> str:
-    if folder != "INBOX":
-        raise MailboxError("Доступна только папка «Входящие»", "unknown")
+def validate_folder_name(folder: str) -> str:
+    if not isinstance(folder, str) or not folder or len(folder) > 512:
+        raise MailboxError("Некорректная папка", "unknown")
+    if re.search(r"[\x00-\x1f\x7f]", folder):
+        raise MailboxError("Некорректная папка", "unknown")
     return folder
+
+
+def _parse_mailbox_name(raw: bytes | str) -> tuple[set[str], str] | None:
+    value = raw.decode("ascii", errors="surrogateescape") if isinstance(raw, bytes) else raw
+    match = re.fullmatch(r"\(([^)]*)\)\s+(?:\"(?:[^\"\\]|\\.)*\"|NIL)\s+(.+)", value)
+    if not match:
+        return None
+    flags = {item.casefold() for item in match.group(1).split()}
+    name = match.group(2).strip()
+    if name.startswith('"') and name.endswith('"'):
+        name = re.sub(r"\\([\\\"])", r"\1", name[1:-1])
+    return flags, name
+
+
+def _mailbox_wire_name(value: str) -> bytes:
+    output = bytearray()
+    buffered: list[str] = []
+
+    def flush() -> None:
+        if not buffered:
+            return
+        encoded = base64.b64encode("".join(buffered).encode("utf-16-be")).rstrip(b"=").replace(b"/", b",")
+        output.extend(b"&" + encoded + b"-")
+        buffered.clear()
+
+    for character in value:
+        codepoint = ord(character)
+        if 0x20 <= codepoint <= 0x7E:
+            flush()
+            output.extend(b"&-" if character == "&" else character.encode("ascii"))
+        else:
+            buffered.append(character)
+    flush()
+    return bytes(output)
+
+
+def _mailbox_storage_name(value: str) -> str:
+    return value.encode("ascii", errors="surrogateescape").decode("ascii")
+
+
+def _quote_mailbox(value: bytes) -> bytes:
+    return b'"' + value.replace(b"\\", b"\\\\").replace(b'"', b'\\"') + b'"'
+
+
+def safe_folder_name(folder: str) -> bytes:
+    validate_folder_name(folder)
+    return _quote_mailbox(_mailbox_storage_name(folder).encode("ascii"))
+
+
+def list_mailboxes(connection: imaplib.IMAP4_SSL) -> list[str]:
+    status, response = connection.list()
+    if status != "OK":
+        raise MailboxError("Не удалось получить папки почты", "unknown")
+    mailboxes: list[str] = []
+    for raw in response or []:
+        if not raw or isinstance(raw, tuple):
+            continue
+        parsed = _parse_mailbox_name(raw)
+        if not parsed:
+            continue
+        flags, name = parsed
+        if "\\noselect" in flags:
+            continue
+        if name not in mailboxes:
+            mailboxes.append(name)
+    return sorted(mailboxes, key=lambda value: value.casefold() != "inbox")
+
+
+def _mailbox_label(value: str) -> str:
+    def decode(match: re.Match) -> str:
+        encoded = match.group(1)
+        if not encoded:
+            return "&"
+        payload = encoded.replace(",", "/")
+        payload += "=" * (-len(payload) % 4)
+        try:
+            return base64.b64decode(payload).decode("utf-16-be")
+        except (ValueError, UnicodeDecodeError):
+            return match.group(0)
+
+    return re.sub(r"&([A-Za-z0-9+,]*)-", decode, _mailbox_storage_name(value))
+
+
+def _extract_fetch_messages(response) -> list[tuple[str, bytes, str]]:
+    result: list[tuple[str, bytes, str]] = []
+    for item in response or []:
+        if not isinstance(item, tuple):
+            continue
+        meta, payload = item
+        meta_bytes = meta if isinstance(meta, bytes) else str(meta).encode("ascii", errors="ignore")
+        match = re.search(rb"\bUID\s+(\d+)\b", meta_bytes, re.IGNORECASE)
+        if match and isinstance(payload, bytes):
+            result.append((match.group(1).decode("ascii"), payload, meta_bytes.decode("ascii", errors="ignore")))
+    return result
+
+
+def _message_sort_value(message: dict) -> float:
+    value = message.get("date")
+    if not value:
+        return float("-inf")
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return float("-inf")
 
 
 def _extract_fetch_bytes(response) -> tuple[bytes, str]:
@@ -338,7 +449,7 @@ class MailService:
             connection = None
             try:
                 connection = self._connect(account)
-                status, _ = connection.select("INBOX", readonly=True)
+                status, _ = connection.select(safe_folder_name("INBOX"), readonly=True)
                 if status != "OK":
                     raise MailboxError("Не удалось открыть входящие", "unknown")
                 return {"ok": True, "message": "Подключение работает"}
@@ -352,8 +463,7 @@ class MailService:
             self.store.update_status(account_id, "error", exc.kind)
             raise
 
-    def list_messages(self, account_id: str, page: int = 1, page_size: int = 30, folder: str = "INBOX") -> dict:
-        folder = safe_folder_name(folder)
+    def list_messages(self, account_id: str, page: int = 1, page_size: int = 30, folder: str = "all") -> dict:
         if page < 1 or page_size < 1 or page_size > 50:
             raise MailboxError("Некорректная страница", "unknown")
 
@@ -361,41 +471,51 @@ class MailService:
             connection = None
             try:
                 connection = self._connect(account)
-                status, _ = connection.select(folder, readonly=True)
-                if status != "OK":
-                    raise MailboxError("Не удалось открыть входящие", "unknown")
-                status, data = connection.uid("search", None, "ALL")
-                if status != "OK":
-                    raise MailboxError("Не удалось получить список писем", "unknown")
-                uids = data[0].split() if data and data[0] else []
-                uids.reverse()
-                start = (page - 1) * page_size
-                selected = uids[start:start + page_size]
                 messages: list[dict] = []
-                for uid_bytes in selected:
-                    uid = uid_bytes.decode("ascii", errors="ignore")
+                total = 0
+                candidate_limit = page * page_size
+                folders = list_mailboxes(connection) if folder == "all" else [validate_folder_name(folder)]
+                for mailbox in folders:
+                    status, _ = connection.select(safe_folder_name(mailbox), readonly=True)
+                    if status != "OK":
+                        continue
+                    status, data = connection.uid("search", None, "ALL")
+                    if status != "OK":
+                        continue
+                    uids = data[0].split() if data and data[0] else []
+                    total += len(uids)
+                    selected_uids = uids[-candidate_limit:]
+                    if not selected_uids:
+                        continue
+                    uid_set = ",".join(uid.decode("ascii", errors="ignore") for uid in selected_uids)
                     status, response = connection.uid(
-                        "fetch", uid,
-                        "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)] FLAGS)",
+                        "fetch", uid_set,
+                        "(UID BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)] FLAGS)",
                     )
                     if status != "OK":
                         continue
-                    raw, flags = _extract_fetch_bytes(response)
-                    if not raw:
-                        continue
-                    message = BytesParser(policy=policy.default).parsebytes(raw)
-                    public = message_to_public(message, uid, flags)
-                    public.pop("body", None)
-                    public.pop("bodyParts", None)
-                    public.pop("attachments", None)
-                    messages.append(public)
+                    for uid, raw, flags in _extract_fetch_messages(response):
+                        message = BytesParser(policy=policy.default).parsebytes(raw)
+                        public = message_to_public(message, uid, flags)
+                        public["folder"] = mailbox
+                        public["folderLabel"] = _mailbox_label(mailbox)
+                        public.pop("body", None)
+                        public.pop("bodyParts", None)
+                        public.pop("attachments", None)
+                        messages.append(public)
+                messages.sort(
+                    key=lambda item: (_message_sort_value(item), item["folder"], item["uid"]),
+                    reverse=True,
+                )
+                start = (page - 1) * page_size
+                selected = messages[start:start + page_size]
                 return {
-                    "messages": messages,
+                    "messages": selected,
                     "page": page,
                     "pageSize": page_size,
-                    "hasMore": start + len(selected) < len(uids),
-                    "total": len(uids),
-                    "folder": folder,
+                    "hasMore": start + len(selected) < total,
+                    "total": total,
+                    "scope": folder,
                 }
             finally:
                 self._close(connection)
@@ -408,17 +528,17 @@ class MailService:
             raise
 
     def get_message(self, account_id: str, uid: str, folder: str = "INBOX") -> dict:
-        folder = safe_folder_name(folder)
         if not uid.isdigit():
             raise MailboxError("Некорректный идентификатор письма", "unknown")
+        folder = validate_folder_name(folder)
 
         def operation(account):
             connection = None
             try:
                 connection = self._connect(account)
-                status, _ = connection.select(folder, readonly=True)
+                status, _ = connection.select(safe_folder_name(folder), readonly=True)
                 if status != "OK":
-                    raise MailboxError("Не удалось открыть входящие", "unknown")
+                    raise MailboxError("Не удалось открыть папку", "unknown")
                 status, response = connection.uid("fetch", uid, "(BODY.PEEK[] FLAGS)")
                 if status != "OK":
                     raise MailboxError("Письмо не найдено", "unknown")
@@ -428,7 +548,10 @@ class MailService:
                 if len(raw) > MAX_MESSAGE_BYTES:
                     raise MailboxError("Письмо слишком большое для просмотра", "unknown")
                 message = BytesParser(policy=policy.default).parsebytes(raw)
-                return message_to_public(message, uid, flags)
+                public = message_to_public(message, uid, flags)
+                public["folder"] = folder
+                public["folderLabel"] = _mailbox_label(folder)
+                return public
             finally:
                 self._close(connection)
         try:
