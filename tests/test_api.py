@@ -10,11 +10,15 @@ from maildeck.store import AccountStore
 
 
 class FakeMailService:
-    def list_messages(self, account_id, page=1, page_size=30, folder="INBOX"):
-        return {"messages": [{"uid": "7", "subject": "Real inbox"}], "page": page,
-                "pageSize": page_size, "hasMore": False, "total": 1, "folder": folder}
+    def __init__(self):
+        self.last_detail_folder = None
+
+    def list_messages(self, account_id, page=1, page_size=30, folder="all"):
+        return {"messages": [{"uid": "7", "subject": "Real inbox", "folder": "INBOX"}], "page": page,
+                "pageSize": page_size, "hasMore": False, "total": 1, "scope": folder}
 
     def get_message(self, account_id, uid, folder="INBOX"):
+        self.last_detail_folder = folder
         return {"uid": uid, "subject": "Real inbox", "body": "Hello", "attachments": []}
 
     def check_account(self, account_id):
@@ -66,10 +70,13 @@ class APITests(unittest.TestCase):
         self.assertNotIn("password", listed[0])
 
         status, _, body = self.call("GET", f"/api/accounts/{account_id}/messages", None)
-        self.assertEqual(json.loads(body)["messages"][0]["subject"], "Real inbox")
+        message_list = json.loads(body)
+        self.assertEqual(message_list["messages"][0]["subject"], "Real inbox")
+        self.assertEqual(message_list["scope"], "all")
 
-        status, _, body = self.call("GET", f"/api/accounts/{account_id}/messages/7", None)
+        status, _, body = self.call("GET", f"/api/accounts/{account_id}/messages/7?folder=Drafts", None)
         self.assertEqual(json.loads(body)["body"], "Hello")
+        self.assertEqual(self.api.mail_service.last_detail_folder, "Drafts")
 
     def test_rejects_large_import(self):
         status, _, body = self.call("POST", "/api/import", {

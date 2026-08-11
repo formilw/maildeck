@@ -81,7 +81,7 @@ class MailParsingTests(unittest.TestCase):
         self.assertNotIn("secret-content", str(result))
 
     def test_rejects_folder_injection(self):
-        self.assertEqual(safe_folder_name("INBOX"), "INBOX")
+        self.assertEqual(safe_folder_name("INBOX"), b'"INBOX"')
         with self.assertRaises(MailboxError):
             safe_folder_name("INBOX\r\nLOGOUT")
 

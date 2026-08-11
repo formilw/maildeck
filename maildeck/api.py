@@ -172,7 +172,7 @@ class MaildeckAPI:
                     return _error(422, "VALIDATION_ERROR", "Некорректная страница")
                 result = self.mail_service.list_messages(
                     messages_match.group(1), page=page, page_size=page_size,
-                    folder=query.get("folder", ["INBOX"])[0],
+                    folder=query.get("folder", ["all"])[0],
                 )
                 return _json(200, result)
 

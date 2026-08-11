@@ -360,15 +360,18 @@ function loadingMessages() {
 }
 
 function messageItem(message) {
-  const button = element('button', `message-item${message.isUnread ? ' is-unread' : ''}${state.activeMessage?.uid === message.uid ? ' is-active' : ''}`);
+  const active = state.activeMessage?.uid === message.uid && state.activeMessage?.folder === message.folder;
+  const button = element('button', `message-item${message.isUnread ? ' is-unread' : ''}${active ? ' is-active' : ''}`);
   button.type = 'button';
   button.dataset.uid = message.uid;
+  button.dataset.folder = message.folder || 'INBOX';
   button.style.setProperty('--item-index', String(Math.min(state.messages.indexOf(message), 8)));
   const top = element('span', 'message-topline');
   top.append(element('span', 'message-sender', message.from || translate('unknownSender')), element('span', 'message-date', formatDate(message.date, true)));
   button.append(top, element('span', 'message-subject', message.subject || translate('noSubject')));
+  if (message.folder && message.folder.toUpperCase() !== 'INBOX') button.append(element('span', 'message-folder', message.folderLabel || message.folder));
   if (message.isUnread) button.append(element('span', 'unread-mark'));
-  button.addEventListener('click', () => openMessage(message.uid));
+  button.addEventListener('click', () => openMessage(message.uid, message.folder));
   return button;
 }
 
@@ -380,8 +383,8 @@ function renderMessages(append = false) {
     empty.append(element('div', 'empty-orbit'), element('h3', '', translate('noMail')), element('p', '', translate('emptyInbox')));
     list.append(empty);
   } else {
-    const existing = new Set($$('[data-uid]', list).map((node) => node.dataset.uid));
-    state.messages.filter((message) => !existing.has(message.uid)).forEach((message) => list.append(messageItem(message)));
+    const existing = new Set($$('[data-uid]', list).map((node) => `${node.dataset.folder}\u0000${node.dataset.uid}`));
+    state.messages.filter((message) => !existing.has(`${message.folder || 'INBOX'}\u0000${message.uid}`)).forEach((message) => list.append(messageItem(message)));
   }
   $('#message-count').textContent = translate('messageCount', { shown: state.messages.length, total: state.total || state.messages.length });
   $('#load-more').hidden = !state.hasMore;
@@ -433,7 +436,7 @@ function renderMessageBody(message) {
 
 function renderReader(message) {
   const content = element('div', 'reader-content');
-  content.append(element('p', 'reader-kicker', `${providerTitle(state.activeAccount.provider).toUpperCase()} · ${formatDate(message.date)}`));
+  content.append(element('p', 'reader-kicker', `${providerTitle(state.activeAccount.provider).toUpperCase()} · ${message.folderLabel || message.folder || 'INBOX'} · ${formatDate(message.date)}`));
   content.append(element('h3', 'reader-title', message.subject || translate('noSubject')));
   const meta = element('div', 'reader-meta');
   meta.append(element('div', 'avatar', initials(message.from)));
@@ -502,17 +505,17 @@ function errorState(message, retry) {
   return box;
 }
 
-async function openMessage(uid) {
+async function openMessage(uid, folder = 'INBOX') {
   if (!state.activeAccount) return;
   readerLoading();
-  state.activeMessage = { uid };
-  $$('.message-item').forEach((node) => node.classList.toggle('is-active', node.dataset.uid === uid));
+  state.activeMessage = { uid, folder };
+  $$('.message-item').forEach((node) => node.classList.toggle('is-active', node.dataset.uid === uid && node.dataset.folder === folder));
   try {
-    const message = await api(`/api/accounts/${state.activeAccount.id}/messages/${uid}`);
+    const message = await api(`/api/accounts/${state.activeAccount.id}/messages/${uid}?folder=${encodeURIComponent(folder)}`);
     state.activeMessage = message;
     renderReader(message);
   } catch (error) {
-    $('#reader-pane').replaceChildren(readerBackButton(), errorState(error.message, () => openMessage(uid)));
+    $('#reader-pane').replaceChildren(readerBackButton(), errorState(error.message, () => openMessage(uid, folder)));
     toast(error.message, 'error');
   }
 }
