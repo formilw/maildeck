@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -234,6 +235,28 @@ class AccountStore:
         result = self._public(row)
         result.update(self._decrypt(row["secrets_encrypted"]))
         return result
+
+    def rotate_outlook_refresh_token(self, account: dict, refresh_token: str) -> bool:
+        """Persist rotation only if the exchanged credentials are still current."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT provider, secrets_encrypted FROM accounts WHERE id = ?", (account["id"],)
+            ).fetchone()
+            if not row:
+                raise AccountNotFound(account["id"])
+            secrets = self._decrypt(row["secrets_encrypted"])
+            if row["provider"] != "outlook" or any(
+                secrets.get(field) != account.get(field)
+                for field in ("password", "client_id", "refresh_token")
+            ):
+                return False
+            secrets["refresh_token"] = refresh_token
+            connection.execute(
+                "UPDATE accounts SET secrets_encrypted = ?, updated_at = ? WHERE id = ?",
+                (self._encrypt(secrets), _now(), account["id"]),
+            )
+        return True
 
     def update_account_organization(
         self,
