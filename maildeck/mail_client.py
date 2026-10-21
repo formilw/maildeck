@@ -370,38 +370,44 @@ class MailService:
         self._oauth_lock = Lock()
 
     def _outlook_access_token(self, account: dict) -> str:
+        # Keep refresh, persistence and cache publication serialized in this service.
         with self._oauth_lock:
             cached = self._oauth_cache.get(account["id"])
             if cached and cached[1] > time.time() + 60:
                 return cached[0]
-        try:
-            body = urllib.parse.urlencode({
-                "client_id": account["client_id"],
-                "grant_type": "refresh_token",
-                "refresh_token": account["refresh_token"],
-                "scope": "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
-            }).encode("ascii")
-            request = urllib.request.Request(
-                "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
-                data=body,
-                method="POST",
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.load(response)
-            token = data.get("access_token")
-            if not isinstance(token, str) or not token:
-                raise MailboxError("Outlook не вернул токен доступа", "oauth")
-            expires = int(data.get("expires_in", 3600))
-            with self._oauth_lock:
+            # Callers may hold an account dictionary from before the last rotation.
+            account = self.store.get_account_with_secrets(account["id"])
+            try:
+                body = urllib.parse.urlencode({
+                    "client_id": account["client_id"],
+                    "grant_type": "refresh_token",
+                    "refresh_token": account["refresh_token"],
+                    "scope": "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
+                }).encode("ascii")
+                request = urllib.request.Request(
+                    "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
+                    data=body,
+                    method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    data = json.load(response)
+                token = data.get("access_token")
+                if not isinstance(token, str) or not token:
+                    raise MailboxError("Outlook не вернул токен доступа", "oauth")
+                expires = int(data.get("expires_in", 3600))
+                refresh_token = data.get("refresh_token")
+                if isinstance(refresh_token, str) and refresh_token.strip():
+                    if not self.store.rotate_outlook_refresh_token(account, refresh_token):
+                        raise MailboxError("Учетные данные Outlook изменились; повторите запрос", "oauth")
                 self._oauth_cache[account["id"]] = (token, time.time() + expires)
-            return token
-        except urllib.error.HTTPError as exc:
-            raise MailboxError("Не удалось обновить доступ Outlook", "oauth") from exc
-        except (urllib.error.URLError, socket.timeout, OSError) as exc:
-            raise MailboxError("Сервер авторизации Outlook временно недоступен", "network") from exc
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise MailboxError("Не удалось обновить доступ Outlook", "oauth") from exc
+                return token
+            except urllib.error.HTTPError as exc:
+                raise MailboxError("Не удалось обновить доступ Outlook", "oauth") from exc
+            except (urllib.error.URLError, socket.timeout, OSError) as exc:
+                raise MailboxError("Сервер авторизации Outlook временно недоступен", "network") from exc
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise MailboxError("Не удалось обновить доступ Outlook", "oauth") from exc
 
     def _connect(self, account: dict) -> imaplib.IMAP4_SSL:
         host = "outlook.office365.com" if account["provider"] == "outlook" else "imap.firstmail.ltd"
